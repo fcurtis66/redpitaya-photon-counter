@@ -1,59 +1,51 @@
-# ZYNQ Time-to-digital converter
-#### A fast high-resolution time-to-digital converter for the Red Pitaya Zynq-7010 SoC
-Tested on Red Pitaya STEMLab 125-10 and STEMLab 125-14
+# redpitaya-photon-counter
 
-Author: Michel Adamic ada.mic94@gmail.com
+A modular, cost-efficient photon counter / time tagger for quantum-optics experiments, built on Red Pitaya STEMlab 125-14 boards (Zynq-7010). It extends Michel Adamic's [`zynq_tdc`](https://github.com/madamic/zynq_tdc) tapped-delay-line time-to-digital converter into a multi-board system with cross-board coincidence logic, photon-number discrimination, and a GUI for experimentalists.
 
-**Performance**\
-TDC core frequency: 350 MHz\
-No. of delay line taps: 192 (configurable)\
-Time resolution per channel: >11 ps\
-Accuracy: <10 ppm\
-DNL: -1 to +4.5 LSB\
-INL: +0.5 to +8.5 LSB\
-Measurement range: 47.9 ms\
-Dead time: ~14 ns\
-Max speed: ~70 MS/s
+Fork: [`fcurtis66/redpitaya-photon-counter`](https://github.com/fcurtis66/redpitaya-photon-counter) — MSc summer project (Quantum Dynamics). Work in progress.
 
-**Included folders**\
-*AXITDC*\
-TDC channel IP. Includes VHDL source files, test benches and customized Xilinx IP cores.
+## What it does (target)
 
-*board*\
-Red Pitaya board definition files.
+- Replicates Adamic's single-board TDC performance (>11 ps resolution).
+- Runs across two boards for 4 input channels, clock-synchronised and skew-calibrated.
+- Detects coincidences across channels and boards.
+- Discriminates photon number (technique from referenced papers).
+- Exposes a GUI so non-VHDL users can configure and run the counter.
+- Scales: additional boards can be daisy-chained with little loss of performance.
 
-*figs*\
-Various figures and schematics of the TDC design.
+## Provenance & licence
 
-*matlab*
-- TDCgui4.mlapp - MATLAB App Designer graphical user interface application.
+This repository builds on Michel Adamic's `zynq_tdc`. Upstream sources are preserved and changes are kept diffable against them. The upstream project appears to be licensed **GPL-3.0** — confirm against the fork and ensure this repository complies (the derived work likely inherits GPL-3.0). A community 4-channel fork ([`JosephFeld/zynq_tdc_4_channel`](https://github.com/JosephFeld/zynq_tdc_4_channel)) exists and is worth reviewing as prior art.
 
-*setup*\
-Files required to run the TDC system on the Red Pitaya board.
-- TDCServer2.c - a Linux-based C program for the Zynq ARM core, which communicates with the TDC channels via the "mmap" system call. Addresses are set in the Address Editor of the TDCsystem project.
-- PLclock script - contains bash commands for lowering the PL clock frequency from 125 to 100 MHz. Has to be executed before TDC implementation.
-- TDCsystem_wrapper.bit - FPGA bitstream.
+## Layout
 
-*src*\
-Source files for creating a two-channel TDC system example project.
+```
+CLAUDE.md            Persistent context for Claude Code (auto-loaded each session)
+DESIGN.md            Living design doc: architecture, decisions, open questions
+README.md            This file
+docs/
+  decisions/         Architecture Decision Records (ADRs)
+  milestones.md      Working roadmap
+  hardware/          Board notes, clock-sync notes, pinouts
+  refs/              References index (papers in the Refs folder)
+host/                PC-side software: ingest, coincidence engine, calibration
+gui/                 Operator GUI
+scripts/             Build/deploy helpers (PLclock, board deploy)
+bitstreams/          Built .bit files (committed with their source commit)
+<upstream dirs>      Adamic's TDC IP core, top-level block design, C server, figures (preserved)
+```
 
-**2-channel TDC system example project**
-1. Open Vivado 2018.2
-2. Using the Tcl Console, navigate to the "zynq_tdc/" folder and execute "source make_project.tcl"
-3. Complete the synthesis & implementation steps
+(The upstream directory names are confirmed once the fork is cloned; see `CLAUDE.md`.)
 
-If you don't want to run these steps and create your own FPGA bitstream, you can use the one already provided in the *setup* folder.
+## Getting started
 
-**Setup on the Red Pitaya system (STEMLab 125-10 or 125-14)**
-1. Copy the contents of the *setup* folder (FPGA bitstream, PLclock script and C server) on the Red Pitaya system
-2. Run PLclock ("./PLclock") to lower the Zynq PL frequency to 100 MHz
-3. Load the FPGA configuration ("cat TDCsystem_wrapper.bit > /dev/xdevcfg")
-4. Compile and run the C server ("gcc -o TDCserver TDCserver2.c" and "./TDCserver")
-5. On a client PC, start the MATLAB GUI application in Matlab App Designer to connect to the TDC system
+1. Clone: `git clone https://github.com/fcurtis66/redpitaya-photon-counter.git`
+2. Read `DESIGN.md` for the architecture and the open decisions.
+3. Hardware: see `docs/hardware/` for the clock-sharing plan once decided.
+4. Toolchain: Vivado (version to be pinned — see `CLAUDE.md` → Common commands).
 
-TDC inputs are located on E1 extension connector pins 17 & 18 (connected to FPGA pins M14 & M15), voltage standard = LVCMOS33 (3,3 V). The TDCs are rising-edge sensitive, i.e. a timestamp is generated for each 0->1 transition.
+## Hardware
 
-**Links**\
-IEEE paper: https://ieeexplore.ieee.org/abstract/document/8904850 \
-My thesis (in Slovene): https://repozitorij.uni-lj.si/IzpisGradiva.php?id=117846&lang=eng \
-Red Pitaya docs, schematics etc.: https://redpitaya.readthedocs.io/en/latest/
+- Board A — STEMlab 125-14 Starter Kit (internal clock).
+- Board B — STEMlab 125-14 External-clock Starter Kit (IZD0031); needs an external 125 MHz clock via E2 to boot.
+- Function generator — pulse/clock source for testing and inter-board skew calibration.

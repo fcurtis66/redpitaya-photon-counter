@@ -1,0 +1,51 @@
+# --- Vivado / Xilinx ---
+*.jou
+*.log
+*.str
+*.zip
+.Xil/
+*.cache/
+*.hw/
+*.sim/
+*.ip_user_files/
+*.runs/
+*.gen/
+*.srcs/sources_1/bd/*/hw_handoff/
+*.srcs/sources_1/bd/*/ui/
+*.os
+vivado*.backup.*
+webtalk*.jou
+webtalk*.log
+.project
+.cr.bin
+
+# Keep generated bitstreams explicit: do NOT ignore bitstreams/ — we version them.
+# But ignore stray build-tree .bit/.bin outside bitstreams/:
+/**/*.runs/**/*.bit
+/**/*.runs/**/*.bin
+
+# --- Python (host / gui) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Node (if a web GUI is used) ---
+node_modules/
+dist/
+build/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- Local, untracked Claude Code notes (optional) ---
+CLAUDE.local.md
