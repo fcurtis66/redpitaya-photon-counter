@@ -1,109 +1,200 @@
-# Deploy workflow
+# Deploy & bring-up — Adamic TDC on Red Pitaya
 
-How code gets from this repo onto a Red Pitaya board. Two-board-aware from the start.
+Repeatable procedure for getting Adamic's 2-channel TDC running on a board and
+verifying its performance (milestone **S0** on Board A, **S1** on Board B).
 
-## Model
+Facts here tagged _[verified, Jun 2026]_ were checked against current Red Pitaya
+docs/datasheets; untagged items are project convention. See `CLAUDE.md` and
+`DESIGN.md` for the wider context, and `docs/decisions/` for the ADRs.
 
-The Red Pitaya is a **deployment target**, not a development machine. It runs Linux on an ARM core but doesn't host Vivado or your editor. So:
+---
 
-- **Repo lives on your PC.** All editing, version control, and Vivado builds happen locally.
-- **Boards receive deliverables**: a built bitstream (`.bit`), the compiled C server, and any helper scripts.
-- **Remote-SSH (VSCode extension)** is used for *viewing/running* on the board — not for editing repo files.
+## 0. Safety first (read before wiring)
 
-```
-┌──────────────────── your PC ────────────────────┐        ┌──── Red Pitaya ────┐
-│  VSCode (local) ── this repo ── Vivado ──┐      │        │                    │
-│                                          │      │  scp/  │  /root/photon_     │
-│  Claude Code (terminal in repo)          ├──────┼──rsync─┤  counter/          │
-│                                          │      │        │   ├ latest.bit     │
-│  VSCode #2 (Remote-SSH) ── inspect/run ──┘      │  ssh   │   ├ tdc_server     │
-│                                                 │        │   └ run.sh         │
-└─────────────────────────────────────────────────┘        └────────────────────┘
-```
+The TDC inputs are **direct 3.3 V FPGA pins** on E1 — no protection, no 50 Ω
+termination. Absolute max on any DIO pin is **−0.40 V to 3.3 V + 0.55 V**
+_[verified]_; exceeding it damages the FPGA permanently.
 
-## One-time setup
+- **Function-generator output load MUST be set to High-Z.** If the Siglent is set
+  to "50 Ω load" while driving the high-impedance FPGA pin, the real output is
+  **2×** the displayed value (3.3 V set → ~6.6 V actual → dead pin).
+- **Scope-verify every new signal at ≤ 3.3 V before it touches the board.**
+- Drive levels **0 V (low) to ~3.0 V (high)** — leave margin below 3.3 V.
+- Watch for **overshoot** on fast edges into a cable; keep cables short.
+- Connect/disconnect E1 jumpers with the board **powered off**.
+- **Avoid E1 pin 1 (+3.3 V) and pin 2 (negative supply rail, ~−3.3 to −4 V).**
 
-### 1. Find each board on the network
+---
 
-Each Pitaya advertises a hostname like `rp-XXXXXX.local` (mDNS). On your PC:
+## 1. Hardware connections
+
+### E1 input pin map (both boards)
+
+The bitstream hard-constrains the two TDC channels to FPGA balls **M14/M15**
+(`src/ports.xdc`), which are the **DIO7** pair on E1:
+
+| Logical | Signal           | FPGA ball | E1 pin |
+|---------|------------------|-----------|--------|
+| CH0     | `hit0` / DIO7_P  | M14       | **17** |
+| CH1     | `hit1` / DIO7_N  | M15       | **18** |
+| Ground  | GND              | —         | **25 or 26** |
+
+- DIO7_P/N are the **9th pin-pair from the +3V3 end (pin 1)**. Locate the pin-1
+  marker on the PCB silkscreen and count up 9 pairs.
+- DIO7 defaults to **GPIO** (its CAN alternate is off by default) — no config.
+- Confirm the GND pin with a multimeter (continuity to an SMA connector shell)
+  before connecting signals. Physical pin numbers can differ on Gen 2 boards —
+  always re-confirm against that board's pinout; M14/M15 is the invariant.
+
+### Signal source / scope
+
+- **Function generator:** Siglent SDG2042X (40 MHz max — fine for test pulses;
+  **cannot** clock Board B, see §2).
+- **Scope:** Tektronix TDS2024C (200 MHz, 4-ch) — used as the safety gate
+  (verify ≤ 3.3 V, check edges) and for ns-level sanity. It cannot resolve the
+  ps-scale TDC timing; that comes from the TDC's own statistics.
+- Cabling: BNC-to-flying-lead (or BNC→screw-terminal) + female Dupont jumpers to
+  the E1 header; an IDC ribbon + breakout is safer than loose jumpers. Use
+  **equal-length** cables for two-channel tests. Tee the scope in with a BNC T to
+  monitor while acquiring.
+
+---
+
+## 2. OS setup
+
+The board-side scripts decide the OS, because **`setup/PLclock` uses the old
+`devcfg` sysfs interface** (`/sys/devices/soc0/amba/f8007000.devcfg/...`) that was
+**removed in OS 2.00** _[verified]_ when Red Pitaya moved to the Linux FPGA
+Manager framework.
+
+### Board A (Gen 1) — OS 1.04
+
+Run S0 on **OS 1.04**, the newest pre-2.0 release, so `PLclock` and
+`cat > /dev/xdevcfg` work unmodified. This isolates wiring/test-bench bugs from
+OS-port bugs.
+
+1. Download the **OS 1.04** image from the Red Pitaya **software archive**
+   (current download pages list only 2.x; older images live in the archive)
+   _[verified]_.
+2. Flash with **balenaEtcher** to a ≥ 8 GB class-10 microSD (select image →
+   select SD card → Flash; double-check the target drive).
+3. Boot (SD + Ethernet + power); reach at `rp-xxxxxxxx.local` or DHCP IP.
+4. `ssh root@<ip>` (password historically `root` — confirm for your image).
+
+### Board B + synchronised boards — OS 2.x (required)
+
+Click Shield synchronisation **requires OS 2.00-23 or newer on all units**
+_[verified]_, so the synced boards run OS 2.x and need the bitstream port (§4,
+Appendix A). Board A stays the single-board dev unit on 1.04.
+
+> Pin the per-board OS choice in `CLAUDE.md` (D7 reproducibility).
+
+---
+
+## 3. Deploy the TDC — OS 1.04 path (Board A)
 
 ```bash
-ping rp-XXXXXX.local       # replace XXXXXX with the MAC suffix from the board sticker
+# from repo root, on the host:
+scp -r setup/ root@<ip>:/root/            # PLclock, TDCserver2.c, bitstream
+
+# on the board (ssh):
+cd /root/setup
+./PLclock                                  # lower PL clock 125 -> 100 MHz (must run first)
+cat TDCsystem_wrapper.bit > /dev/xdevcfg   # load bitstream (OS 1.04 method)
+gcc -o tdc_server TDCserver2.c -lm         # compile C server
+./tdc_server                               # serves TDC over TCP on port 1001
 ```
 
-If mDNS doesn't resolve on your network, use the board's DHCP IP (check your router) and consider assigning a static lease.
+Sanity: the server should report listening on **port 1001**. Each channel's BRAM
+holds 2048 × 64-bit timestamps (AXI addrs in `CLAUDE.md`).
 
-### 2. SSH keys (no more password prompts)
+---
 
-```bash
-# On your PC — generate a key if you don't have one
-ssh-keygen -t ed25519 -C "redpitaya"
+## 4. Host readout (MATLAB GUI)
 
-# Copy public key to each board (default password is 'root')
-ssh-copy-id root@rp-AAAAAA.local
-ssh-copy-id root@rp-BBBBBB.local
+1. Open `matlab/TDCgui5.mlapp` in MATLAB App Designer.
+2. Connect to `<board-ip>:1001`.
+3. With a slow pulse train on CH0, confirm timestamps appear at the expected
+   interval. That is S0 "first light".
 
-# Then change the root password on each board
-ssh root@rp-AAAAAA.local 'passwd'
-```
+(A Python TCP client to port 1001 is the planned `host/` replacement; not needed
+for S0.)
 
-### 3. SSH config for friendly names
+---
 
-Put this in `~/.ssh/config` on your PC:
+## 5. S0 performance tests (the pass/fail)
 
-```
-Host board-a
-    HostName rp-AAAAAA.local
-    User root
-    IdentityFile ~/.ssh/id_ed25519
+Record each measured value next to the paper's spec — that table is the S0
+checklist in `milestones.md`. Target specs: >11 ps resolution, ~14 ns dead time,
+47.9 ms range, ~70 MS/s, ~350 MHz core.
 
-Host board-b
-    HostName rp-BBBBBB.local
-    User root
-    IdentityFile ~/.ssh/id_ed25519
-```
+1. **First light** — low-rate pulse on CH0; timestamps arrive at the rep-rate
+   interval. Confirms the whole chain.
+2. **Two-channel skew / single-shot jitter** — split one generator edge to CH0
+   (pin 17) and CH1 (pin 18) via a BNC-T with **equal-length** cables. Histogram
+   Δt = t(CH1) − t(CH0). Mean = channel/cable skew; σ = combined single-shot
+   jitter (≈ √2 × per-channel). Sanity + a first resolution figure.
+3. **Resolution / bin width (the >11 ps number)** — feed a signal **asynchronous**
+   to the TDC core clock; histogram the fine-time codes. Bin widths give the LSB
+   and DNL/INL. Use the same statistical (code-density) method as the paper so
+   numbers are comparable.
+4. **Dead time (~14 ns)** — two pulses with decreasing separation (double-pulse /
+   burst, or the two phase-locked Siglent channels). Find the minimum spacing at
+   which **both** are still timestamped.
+5. **Range (47.9 ms)** — low-frequency input; confirm timestamps climb to
+   ~47.9 ms before the coarse counter rolls over.
+6. **(Optional) Throughput** — high-rate train. Note the off-board path saturates
+   at the **~10–12 M tags/s Ethernet ceiling** (64-bit tags, 1 GbE) before the
+   TDC's ~70 MS/s — so confirm core behaviour, not full off-board rate.
 
-After this:
+---
 
-- `ssh board-a` just works.
-- In VSCode's Remote-SSH extension, `board-a` and `board-b` appear by name.
-- The deploy script targets boards by alias instead of hostname.
+## 6. S1 (Board B)
 
-### 4. Decide which physical board is A and B and write it down
+Provide Board B's 125 MHz via the **Click Shield onboard oscillator** (Board B's
+own external-clock requirement; the Siglent's 40 MHz can't do it). On OS 2.x with
+the ported bitstream (Appendix A), repeat §3–§5. No cross-board work yet — that is
+S2 and depends on D1 + the clock-source question (Appendix B).
 
-In `docs/hardware/inventory.md` (create when you have both boards in hand): record each board's MAC, serial, role (A = standard kit, B = external-clock IZD0031), and SSH alias. This matters because the two boards are *not* identical (clock-input wise), and confusing them costs time.
+---
 
-## Daily workflow
+## Appendix A — OS 2.x bitstream port (for B / synced boards)
 
-```bash
-# In VSCode (local) — edit, then commit
-git commit -am "feat: ..."
+1. **Convert the bitstream** on the host (Vivado 2018.2 ships `bootgen`):
+   ```
+   echo -n "all:{ TDCsystem_wrapper.bit }" > fpga.bif
+   bootgen -image fpga.bif -arch zynq -process_bitstream bin -o TDCsystem_wrapper.bit.bin -w
+   ```
+2. **Load with FPGA Manager:** `fpgautil -b /root/setup/TDCsystem_wrapper.bit.bin`
+   (or `overlay.sh` with a project dir).
+3. **Reproduce the 100 MHz PL clock.** `PLclock` will NOT work on OS 2.x. The
+   documented route is a **device-tree overlay** that sets the PL clock to
+   100 MHz, loaded via `overlay.sh`. _Author/validate this `.dtbo`; this is the
+   real work of the port, not the bootgen step._ **TODO: confirm and record the
+   exact method here once tested.**
 
-# Build bitstream in Vivado (GUI or tcl) → output lands in bitstreams/
+## Appendix B — Open risk: does the shared clock reach the TDC? (S2)
 
-# Deploy to one board
-./scripts/deploy.sh board-a
+`PLclock` lowers **FCLK0** to 100 MHz and 350 MHz divides cleanly from 100 (not
+from 125), which suggests the TDC core derives from **FCLK0** — a **PS-PLL clock
+fed by each board's own PS crystal**, *independent* of the 125 MHz ADC clock that
+a Click Shield shares.
 
-# Open a second VSCode window via Remote-SSH to board-a
-# to inspect logs / run the C server / poke at /dev/xdevcfg
-```
+If so, sharing the ADC clock will **not** synchronise the TDC time base, and S2
+requires modifying the block design to clock the TDC's MMCM from the shared
+125 MHz (opening the black box). **Verify against `src/TDCsystem_bd.tcl`
+(which clock feeds the TDC MMCM) before relying on cross-board sync.** Does not
+affect S0/S1.
 
-## Deploy script
+---
 
-See `scripts/deploy.sh` — a thin wrapper around `rsync` + `ssh` that:
+## Troubleshooting quick hits
 
-1. Pushes the latest bitstream and compiled server to a known directory on the board.
-2. Loads the bitstream into the PL via `/dev/xdevcfg`.
-3. Optionally restarts the C server.
-
-The script is intentionally small. Claude Code can flesh it out once we know the upstream's exact file names and the compiled-binary location.
-
-## Cross-compilation (later)
-
-Compiling the C server *on* the Pitaya is fine for development (gcc is present). For reproducible builds, set up a cross-compiler on the PC (`arm-linux-gnueabihf-gcc`) and build into `host/build/` — this becomes important once we're iterating fast across two boards. Decide later; flagged in DESIGN.md if/when it matters.
-
-## Two-board specifics
-
-- All deploy commands take a board alias argument. **Never** assume a default.
-- When running an experiment, deploy *the same commit* to both boards. The deploy script should print the git SHA it pushed; verify A and B match before trusting any coincidence data.
-- Bitstreams should be identical across boards (the modularity goal). If they aren't, that's a design smell — record why in an ADR.
+- **No timestamps:** check `PLclock` ran *before* the bitstream load; check the
+  C server is up on :1001; scope-confirm the pulse actually reaches pin 17 at
+  3.3 V logic; confirm rising edges (TDC is 0→1 sensitive).
+- **Nonsense / no edges:** likely wrong E1 pin — re-verify pin 17/18 vs pin-1
+  marker.
+- **Board dead after wiring:** suspect over-voltage (load setting / overshoot) or
+  a jumper on pin 1/2.
+- **`/dev/xdevcfg` missing:** you are on OS 2.x — use Appendix A.
