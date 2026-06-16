@@ -52,3 +52,12 @@ target design.
   cases are offline/near-real-time photon counting, not feedback control.
 - PNR (D5) is also host-side post-processing in this architecture — consistent
   with running coincidence on the host.
+
+## Verified from the HDL (2026-06-16)
+
+- Each 64-bit BRAM word is `[21 zero bits][11-bit partner event-count][32-bit
+  timestamp]` (`control.vhd`). The embedded **partner event-count** is a free
+  **intra-board** pairing/ordering hint the merge logic can use — but it is
+  intra-board only; cross-board ordering relies on the Path B shared time base.
+- Only **43 of 64 bits are real payload** → the wire-format compression in D4 is
+  concrete (a packed format ~halves off-board volume before any DMA).

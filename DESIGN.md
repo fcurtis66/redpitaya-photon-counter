@@ -4,7 +4,7 @@ This is the single source of truth for the project's architecture, decisions, an
 
 This file lives in the repo (so Claude Code reads it) **and** is uploaded to the Claude Project knowledge base (so planning chats read it). When it changes meaningfully, re-upload it to the Project.
 
-_Last updated: 2026-06-15 — by Frankie (planning-chat sync: D2/D7 decided; D1/D4/D5/D6 refined with verified Red Pitaya facts)_
+_Last updated: 2026-06-16 — by <!-- name --> (planning-chat sync 2: D1 decided = Path B; clock source, trigger port, and wire-format payload verified from the HDL/block design)_
 
 ---
 
@@ -41,6 +41,8 @@ Four layers, each doing what it is best at:
 
 **Decided (D2 — see §7, ADR-0002):** keep per-board firmware identical and do cross-board coincidence **on the host**. This maximises modularity (add a board = add a stream) at the cost of pushing data-path/throughput pressure onto Ethernet + host. The rejected alternative (coincidence in the PL, or on each ARM) is lower-latency but harder to keep modular. The throughput pressure is real and bounded — see §4 and D4/D6 — and is mitigated first by a compact wire format, and only if necessary by PL-side DMA (a stretch that reopens the bitstream).
 
+_Built-in intra-board aid (verified from `control.vhd`):_ each 64-bit timestamp word already embeds the **partner channel's event count** at the moment of the event (`data <= zeros & trigger_in & timestamp`). So for the two channels on one board the host gets a free ordering/pairing hint. This is **intra-board only** — it does nothing across boards, where ordering relies on the Path B shared time base (§4).
+
 ## 4. The clock-coherence problem (the crux)
 
 The TDC's picosecond resolution is *within* a board. A coincidence between a channel on Board A and a channel on Board B is only as good as how phase-coherent the two boards' clocks are, plus a fixed inter-board skew.
@@ -52,41 +54,46 @@ The TDC's picosecond resolution is *within* a board. A coincidence between a cha
 **Verified hardware facts** _[Red Pitaya docs, Jun 2026]_ that shape the choice:
 
 - The **SATA daisy-chain** sync (RP "X-Channel") routes the master clock *through the FPGA* to the ADC and **adds jitter**; RP recommend the external-clock / **Click-Shield** (U.FL) distribution when low noise matters. For a ps timing instrument, prefer low-jitter external distribution over the convenient SATA chain, and prefer a **star fan-out** over a literal daisy chain (no cumulative per-hop degradation; no board-2-kills-board-3 dependency) for the N-board modularity goal.
-- **Our two boards are mismatched.** Board A (standard Starter Kit) has its internal crystal and **no reference-clock input** — feeding it an external clock needs a hardware mod. Board B (IZD0031) **must** receive 125 MHz on **E2** or it won't operate. Getting both onto one oscillator is therefore non-trivial.
+- **Our two boards are mismatched, so the synced system is built from external-clock boards.** Board A (standard Starter Kit) has its internal crystal and **no reference-clock input**, so it cannot join a shared-clock chain — it **stays the single-board dev unit** (S0/S1). The synchronised system is **Board B (IZD0031) + a second external-clock board**, both clocked from the **Click Shield's onboard 125 MHz oscillator** over U.FL. The Click Shield also supplies Board B's mandatory boot clock and is the chosen distribution method (D1, §7). Requires OS 2.00-23+ on the synced boards.
 - The documented X-Channel system is built from **Low-Noise** boards whose secondaries are SATA-clock-modified — neither of our boards is one, and **Board B's modification is for E2, not SATA** — so X-Channel is **not drop-in**. The `daisy_tool` CLI enables shared clock **and trigger**; the shared trigger establishes a common time origin (handles "do the boards' counters start together?").
 - RP product churn: the original X-Channel is marked discontinued while a new one relaunched ~Nov 2025. **Confirm current hardware and exact wiring with RP support + supervisor before buying a distribution amp or modifying Board A.**
 
-Open hardware question (D1, see §6 + ADR-0001): with the mismatch above, the realistic routes are (a) an external 125 MHz source → Board B E2 and a modified Board A; (b) Board A as master relaying its clock to Board B's E2 (needs a path off Board A); (c) — explicitly rejected — two independent sources. None is free; (a) scales best to N boards.
+**Where the TDC clock actually comes from — verified from `src/TDCsystem_bd.tcl`.** The TDC core's 350 MHz is produced by an MMCM (`clk_wiz_0`) whose input is **FCLK_CLK0** (100 MHz) from the PS — i.e. it derives from each board's **own PS reference crystal** (~33 MHz via the PS PLLs), **not** from the 125 MHz ADC/external clock. The ADC clock is not used anywhere in the design. **Consequence: sharing the 125 MHz across boards (Click Shield) does not by itself synchronise the TDCs** — each board's core still ticks on its independent PS crystal. Two ways to fix it:
+
+- **Path A — shared reference, no bitstream change.** Feed a common reference edge (laser sync, or the Click Shield trigger) to one TDC channel on each board; do all timing relative to it on the host. Because the experiment is pulsed at 80 MHz, the reference recurs every 12.5 ns and inter-clock drift within that window is ~femtoseconds — negligible. Keeps the black box. **Cost: one channel per board for the reference** (so only 2 detectors on our two boards), and the per-board reference can't be shared.
+- **Path B — re-clock the TDC from the shared 125 MHz. _CHOSEN (D1, §7 + ADR-0001)._** Modify the block design so the MMCM is fed by the shared external 125 MHz instead of FCLK0 (reconfigure for 350-from-125), so all boards' clocks are genuinely locked. With the Click Shield's shared trigger as a common origin, **all channels stay free for detectors and one shared sync serves the whole system** — the basis for unified, modular PNR (D5). Cost: opens the black box (block-design + IP work — *not* VHDL authoring; the hand-placed carry-chain TDC core is untouched) and requires **re-characterising resolution at the new clock**. Sequencing: S0/S1 stay on the internal-clock black box; Path B is the S2 work.
 
 ## 5. Channel map
 
-| Logical channel | Board | Physical input | Notes |
+Both TDC channels on a board are the **DIO7 pair** on E1 (verified from `src/ports.xdc` + the RP pinout): `hit0` = DIO7_P = FPGA **M14** = **E1 pin 17**; `hit1` = DIO7_N = FPGA **M15** = **E1 pin 18**. Ground on E1 pin 25/26. Inputs are LVCMOS33 (≤3.3 V), **rising-edge** sensitive. Avoid pin 1 (+3V3) and pin 2 (negative supply rail).
+
+| Logical channel | Board | Physical input | FPGA ball |
 |---|---|---|---|
-| CH0 | A | IN1 | |
-| CH1 | A | IN2 | |
-| CH2 | B | IN1 | |
-| CH3 | B | IN2 | |
+| CH0 | A | E1 DIO7_P (pin 17) | M14 |
+| CH1 | A | E1 DIO7_N (pin 18) | M15 |
+| CH2 | B | E1 DIO7_P (pin 17) | M14 |
+| CH3 | B | E1 DIO7_N (pin 18) | M15 |
 
-(Confirm input polarity/threshold/AC-DC coupling expectations for detector pulses.)
+(Confirm input polarity/threshold/AC-DC coupling for detector pulses. Physical pin numbers can differ on Gen 2 boards — M14/M15 is the invariant.)
 
-_Note (depends on D5):_ a timing-based PNR scheme changes this map. Single-threshold arrival-time-shift PNR needs one channel for the **laser sync** (e.g. CH3), leaving 3 for detectors; multi-threshold time-over-threshold PNR consumes 2–3 channels *per detector* and would exhaust 4 channels with a single detector pair. Revisit this table once D5 is settled.
+_Channel roles & PNR reference (D5, under Path B):_ PNR needs a **time reference**; the laser sync is the natural one. Because Path B locks all boards to one time base, **a single laser-sync channel anywhere in the system** references every detector on every board → **2N−1 detectors** on N two-channel boards, all simultaneously time-tagging *and* PNR-capable (no separate "tag vs PNR" modes). The reference need **not** be the laser sync — a **self-reference comparator** scheme (two thresholds per detector) needs no sync but costs **2 channels per detector** → only N detectors. The AXITDC `trigger_in` port **cannot** carry the sync: it is an **inter-channel event-counter bus**, not an edge input (verified from `control.vhd`/`AXITDC.vhd`). Even (2N) detector counts would require adding a **dedicated sync channel in the FPGA** — feasible (E1 exposes 16 DIO; the 7010 has slice/BRAM headroom) but it is hand-placed carry-chain work (the one genuinely expert/invasive change).
 
 ## 6. Open decisions
 
-Move each to the decision log below once settled, and write an ADR for the architectural ones. (D2 and D7 have been settled — see §7.)
+Move each to the decision log below once settled, and write an ADR for the architectural ones. (D1, D2, D7 settled — see §7.)
 
-- **D1 — Clock-sharing scheme** between Board A and Board B (see §4). **Principle settled** (one oscillator → constant skew → calibrate out); the **physical scheme is open** (which source, which connector per board, jitter-vs-convenience). Architectural → ADR-0001 drafted (status: Proposed). Do not buy/modify hardware before confirming wiring with RP support. _Blocks S2._
 - **D3 — GUI stack** (web app served from a board, vs desktop Python/Qt on the host). Must be free and portable for non-engineer users.
-- **D4 — Timestamp wire format** between boards and host. Leaning **compact 32-bit / delta-encoded** rather than 64-bit: full range (47.9 ms) at full resolution (~11 ps) needs ~32 bits, and halving tag size roughly **doubles** the sustainable count rate (see D6). Settles alongside the merge strategy (now in §3).
-- **D5 — Photon-number method.** **Reframed.** The reference slope/mean-derivative methods need the analog pulse trace (5 GS/s, 3 GHz); the RP analog path (125 MS/s, DC–60 MHz) is ~50× too slow, and the TDC records threshold-crossing *times* only — so slope PNR cannot be done as host post-processing of TDC data. Viable path is **timing-based** (higher photon number → steeper edge → earlier crossing; Kuijf: projection ≈ C·Δt). Real question for S4: *can a ps-TDC do same-board arrival-time-shift PNR well enough for a clean 1-vs-≥2 herald cut?* Options + trade-offs in §11 refs and CLAUDE.md. Validate on the function generator (two slightly time-shifted pulses) before any detector. **Depends on D1 jitter** (likely must be same-board).
-- **D6 — Target coincidence window & max count rate.** **Partially answered.** Lab laser fires every 12.5 ns (80 MHz); a **few-ns window** sits safely inside one pulse period with ample ps-resolution margin. Sustainable rate is **Ethernet-bound at ~10–12 M tags/s aggregate per board** (64-bit tags, 1 GbE), *not* TDC-limited; the 2048-deep BRAM is a ~29 µs burst buffer; TDC dead time (~14 ns) exceeds the laser period, so consecutive pulses can't both be tagged. Refine the target once the expected per-detector singles rate is known. Drives D4.
+- **D4 — Timestamp wire format.** Leaning **compact / packed**. Verified from the core (`control.vhd`): each 64-bit BRAM word is `[21 zero bits][11-bit partner event-count][32-bit timestamp]` — only **43 bits of real payload**, 21 hardwired zeros. So a packed wire format nearly halves off-board data immediately (before any DMA) and roughly doubles the sustainable count rate (D6). Decide packing + merge/ordering strategy (merge is in §3).
+- **D5 — Photon-number method.** **Reframed; reference mechanism analysed (see §5).** Trace/slope methods need the analog pulse (5 GS/s, 3 GHz); the RP analog path (125 MS/s, DC–60 MHz) is ~50× too slow and the TDC records threshold-crossing *times* only — so PNR must be **timing-based** (higher photon number → steeper edge → earlier crossing; Kuijf: projection ≈ C·Δt). Two reference mechanisms: **laser-sync** (1 shared channel, channel-efficient under Path B) or **self-reference comparators** (2 channels/detector, no sync). Still **open**: (1) feasibility — whether a ps-TDC's jitter budget resolves the tens-of-ps photon-number shifts for a clean **1-vs-≥2** cut; (2) which reference mechanism. Validate on the function generator (two slightly time-shifted pulses) before any detector. Sequenced after Path B (S4).
+- **D6 — Target coincidence window & max count rate.** **Partially answered.** Lab laser fires every 12.5 ns (80 MHz); a **few-ns window** sits safely inside one pulse period with ample ps-resolution margin. Sustainable rate is **Ethernet-bound at ~10–12 M tags/s aggregate per board** (64-bit tags, 1 GbE), *not* TDC-limited; the 2048-deep BRAM is a ~29 µs burst buffer; TDC dead time (~14 ns) exceeds the laser period, so consecutive pulses can't both be tagged. Refine once the expected per-detector singles rate is known. Drives D4.
 
 ## 7. Decision log
 
 _Decisions that have been made. Newest first. Link ADRs where written._
 
+- **2026-06-16 — D1: cross-board clock sync via Path B (re-clock the TDC from a shared 125 MHz, distributed by Click Shield).** Verified from `src/TDCsystem_bd.tcl` that the TDC core derives from FCLK0 (each board's PS crystal), **not** the ADC clock — so sharing the ADC clock alone does not synchronise the TDCs. Chose **Path B** (re-point the MMCM to the shared external 125 MHz) over Path A (per-board laser-sync reference) because it locks the clocks, frees all channels for detectors, and lets one shared sync serve N boards — the basis for unified, modular PNR. Hardware: a second external-clock board + 2 Click Shields; **Board A (standard kit) stays the single-board dev unit, not in the synced chain**; synced boards need OS 2.x. Implementation pending (block-design re-clock for 350-from-125 + resolution re-characterisation; carry-chain core untouched). Architectural → **ADR-0001** (now Accepted). _Sequencing: S0/S1 on internal clock first; Path B is S2._
 - **2026-06-15 — D2: cross-board coincidence runs on the host PC.** Per-board firmware stays identical; the host k-way-merges the per-channel streams and runs a single sliding-window pass. Chosen for modularity (add a board = add a stream); accepts throughput pressure on Ethernet/host, mitigated by a compact wire format (D4) and, only if needed, PL-side DMA. Architectural → **ADR-0002** (`docs/decisions/`).
-- **2026-06-15 — D7: Vivado 2018.2 pinned; prebuilt 2-channel bitstream used as a black box.** `setup/TDCsystem_wrapper.bit` deployed identically to both boards covers all 4 channels (CH0/CH1 on A, CH2/CH3 on B), so no Vivado rebuild is needed through S3. The black box is reopened only for the DMA work (a D2-related stretch). Any Vivado upgrade is itself recorded as an ADR. _(Toolchain pin — log entry, no standalone ADR.)_
+- **2026-06-15 — D7: Vivado 2018.2 pinned; prebuilt 2-channel bitstream used as a black box.** `setup/TDCsystem_wrapper.bit` deployed identically to both boards covers all 4 channels (CH0/CH1 on A, CH2/CH3 on B), so no Vivado rebuild is needed through S3. The black box is reopened for the Path B re-clock (S2) and the DMA work. Any Vivado upgrade is itself recorded as an ADR. _(Toolchain pin — log entry, no standalone ADR.)_
 
 ## 8. Milestones / roadmap
 
@@ -94,9 +101,11 @@ See `docs/milestones.md` for the working roadmap; high-level order is S0 → S7 
 
 ## 9. Risks
 
-- Inter-board clock-distribution **jitter** (not just frequency coherence) caps cross-board coincidence resolution below the single-board >11 ps. _Mitigation: settle D1 toward low-jitter external distribution; calibrate the constant skew with the function generator before any optics; keep PNR same-board (D5)._
-- Host data path can't sustain the count rate → dropped tags. Verified ceiling ≈ 10–12 M tags/s per board (64-bit tags over 1 GbE); BRAM is only a ~29 µs burst buffer. _Mitigation: compact 32-bit/delta wire format (D4) to ~double the ceiling; size buffers; test with high-rate pulse trains; PL-side DMA as a last resort (reopens the bitstream)._
-- Toolchain/bitstream reproducibility drift. _Mitigation: pin Vivado version (D7); commit bitstreams with their source commit._
+- Inter-board clock-distribution **jitter** caps cross-board coincidence resolution below the single-board >11 ps. _Mitigation: Path B locks clocks via the low-jitter Click Shield; calibrate the constant skew on the function generator before any optics._
+- **Path B re-clock changes the TDC's clock source** (FCLK0 → shared 125 MHz). The delay-line resolution is clock-dependent, so it **must be re-characterised** after the re-clock, and the bitstream rebuild must close timing at 350 MHz. _Mitigation: keep the carry-chain core untouched; re-run the code-density resolution test and compare to the S0 baseline before trusting cross-board numbers._
+- Expanding past 2 channels/board (e.g. for even detector counts) means **hand-placed carry-chain work** — the most invasive part of the design and the maintainer can't write it. _Mitigation: prefer the laser-sync (2N−1) scheme; treat extra channels as a separate, scoped effort._
+- Host data path can't sustain the count rate → dropped tags. Verified ceiling ≈ 10–12 M tags/s per board (64-bit tags over 1 GbE); only **43 of 64 bits are real payload** (`control.vhd`), so a packed format ~doubles headroom. _Mitigation: packed wire format (D4); size buffers; test high-rate trains; PL-side DMA as a last resort._
+- Toolchain/bitstream reproducibility drift, incl. the **OS split** (Board A on OS 1.04 for the black-box `PLclock`/`xdevcfg` flow; synced boards on OS 2.x for Click Shield + the ported bitstream). _Mitigation: pin Vivado 2018.2 and the per-board OS in CLAUDE.md; commit bitstreams with their source commit._
 - Scope creep beyond a one-summer project. _Mitigation: treat S0–S3 as the core deliverable; S4–S7 as stretch._
 
 ## 10. Prior art
@@ -122,4 +131,5 @@ Index of the papers in the Refs folder. For each: short tag, full citation, what
 
 ## Changelog
 
+- 2026-06-16 — Planning-chat sync 2. **Decided D1 = Path B** (re-clock the TDC from a shared 125 MHz via Click Shield); added the §7 entry and rewrote ADR-0001 to Accepted. Verified from `TDCsystem_bd.tcl` that the TDC clock comes from FCLK0/PS-crystal, not the ADC clock (§4), and documented the Path A vs Path B trade. Confirmed E1 pins (DIO7_P/N = M14/M15 = pins 17/18) and rewrote §5 with the laser-sync-vs-self-reference PNR economics. Verified from `control.vhd`/`AXITDC.vhd` that `trigger_in` is an inter-channel event-counter bus (not a usable sync input) and that only 43 of 64 BRAM bits are payload (informs D4); noted the partner-count intra-board coincidence aid (D2). Updated risks (Path B resolution re-characterisation, carry-chain expansion, OS split). — <!-- name -->
 - 2026-06-15 — Planning-chat sync. Decided D2 (coincidence on host) and D7 (Vivado 2018.2 + black-box 2-ch bitstream); added decision-log entries and ADR-0001 (D1, Proposed) / ADR-0002 (D2, Accepted). Refined §4 with verified Red Pitaya clock/jitter facts and the Board A/B mismatch; reframed D5 (timing-based PNR, not analog-trace); answered D6 in part (80 MHz laser, few-ns window, ~10–12 M tags/s/board Ethernet ceiling); leaned D4 toward compact 32-bit/delta tags; populated §11 with the two PNR papers. — <!-- name -->

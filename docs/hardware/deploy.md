@@ -173,18 +173,26 @@ S2 and depends on D1 + the clock-source question (Appendix B).
    real work of the port, not the bootgen step._ **TODO: confirm and record the
    exact method here once tested.**
 
-## Appendix B — Open risk: does the shared clock reach the TDC? (S2)
+## Appendix B — Cross-board sync: the TDC clock source (RESOLVED → Path B)
 
-`PLclock` lowers **FCLK0** to 100 MHz and 350 MHz divides cleanly from 100 (not
-from 125), which suggests the TDC core derives from **FCLK0** — a **PS-PLL clock
-fed by each board's own PS crystal**, *independent* of the 125 MHz ADC clock that
-a Click Shield shares.
+**Confirmed from `src/TDCsystem_bd.tcl`:** the TDC core's 350 MHz is produced by
+the `clk_wiz_0` MMCM whose input is **FCLK_CLK0** (100 MHz from the PS, i.e. each
+board's own PS crystal). The 125 MHz ADC/external clock is **not used anywhere**
+in the design. So sharing the 125 MHz (Click Shield) does **not** by itself
+synchronise the two TDCs — each ticks on its independent PS crystal.
 
-If so, sharing the ADC clock will **not** synchronise the TDC time base, and S2
-requires modifying the block design to clock the TDC's MMCM from the shared
-125 MHz (opening the black box). **Verify against `src/TDCsystem_bd.tcl`
-(which clock feeds the TDC MMCM) before relying on cross-board sync.** Does not
-affect S0/S1.
+**Decision (D1, ADR-0001): Path B.** S2 re-clocks the TDC by re-pointing
+`clk_wiz_0/clk_in1` from `FCLK_CLK0` to the shared external 125 MHz and
+reconfiguring the MMCM for 350-from-125 (e.g. VCO 875 MHz: ×7 then ÷2.5). Then
+rebuild and **re-run the code-density resolution test** (§5 step 3) against the S0
+baseline — the delay-line resolution is clock-dependent and must be re-verified.
+The carry-chain TDC core is **not** touched. This is block-design/IP work, not
+VHDL authoring.
+
+(Path A — a per-board laser-sync reference with no bitstream change — was the
+fallback; it works because pulsed-experiment drift over 12.5 ns is ~fs, but it
+costs one channel per board. Rejected in favour of Path B's all-channels-free,
+one-shared-sync scaling. See ADR-0001.) Does not affect S0/S1.
 
 ---
 
