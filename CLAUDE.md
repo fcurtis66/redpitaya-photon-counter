@@ -47,7 +47,8 @@ bitstreams/       Built .bit files, each committed alongside the source commit t
 
 ### TDC core & toolchain
 - STEMlab 125-14 = Zynq-7010. Adamic's TDC: ~350 MHz core clock, >11 ps resolution, ~14 ns dead time, ~70 MS/s, 47.9 ms measurement range.
-- **Vivado 2018.2** — required to source `src/TDCsystem_bd.tcl` without version mismatch. Pin this; record any upgrade as an ADR.
+- **S0 measured baseline (Board A, OS 1.04, 2026-06) — the control for later changes:** 170 active taps of 192, **16.81 ps avg bin width** (code-density, 83 884 counts), **no missing codes**, **single-channel σ ≈ 13.4 ps** (two-channel diff /√2). Expected carry-chain DNL: even/odd zig-zag + a few CLB-boundary fat bins (worst ~74 ps). Re-measure after the OS-2.x port and the Path B re-clock and compare to this.
+- **Vivado 2025.2** — current pinned version (upgraded from 2018.2; `src/TDCsystem_bd.tcl` updated accordingly). Pin this; record any further upgrade as an ADR.
 - The PL clock must be lowered 125 → 100 MHz before loading the bitstream (`setup/PLclock`). PLclock uses the old `devcfg` sysfs → **OS 1.04 only**; on OS 2.x the 100 MHz must be set via a device-tree overlay (see `docs/hardware/deploy.md`).
 - TDC inputs: E1 pins 17 & 18 (FPGA M14/M15), LVCMOS33 (3.3 V), **rising-edge** sensitive. Detector pulses must arrive as clean 3.3 V logic edges → a discriminator/comparator sits in front of each detector, and pulse amplitude/shape is discarded there.
 - **The pre-built `setup/TDCsystem_wrapper.bit` is a 2-channel design.** Deployed identically to both boards it yields all 4 channels (CH0/CH1 on A, CH2/CH3 on B). No 4-channel bitstream or Vivado rebuild is needed through S3 — treat the bitstream as a **black box** until/unless the DMA work (D2) is taken on.
@@ -70,6 +71,7 @@ bitstreams/       Built .bit files, each committed alongside the source commit t
 - The AXITDC **`trigger_in` port canNOT carry the sync** — it is an inter-channel **event-counter bus**, not an edge input _[verified `control.vhd`/`AXITDC.vhd`]_. The sync must occupy a real hit channel.
 - Even (2N) detector counts → need a **dedicated FPGA sync channel** = hand-placed carry-chain work (2 ch/board is Adamic's choice, not a HW limit; E1 exposes 16 DIO).
 - Target use (discard heralds ≠ intended n, to lower g²(0)) needs only a clean **1-vs-≥2** cut — the achievable regime; per Sempere-Llagostera the limit was source efficiency, not detector resolution.
+- **Per-tap code-density calibration is a PNR prerequisite, not optional** (from S0 diagnostics): the delay-line DNL (zig-zag + ~74 ps fat bins) is at the **same tens-of-ps scale as the photon-number shifts**, so linearise raw taps with the S0 calibration table before any PNR decision, and keep the discrimination point off known fat bins.
 - Still **OPEN**: feasibility — does the jitter budget resolve the tens-of-ps photon-number shifts? Validate on the function generator (two slightly time-shifted edges) before any detector.
 
 ### Data path & count rate (shapes D4/D6)
@@ -80,7 +82,7 @@ bitstreams/       Built .bit files, each committed alongside the source commit t
 
 ## Common commands
 
-- **Create Vivado project from scratch:** in Vivado 2018.2 Tcl console, `source make_project.tcl` from the repo root
+- **Create Vivado project from scratch:** in Vivado 2025.2 Tcl console, `source make_project.tcl` from the repo root
 - **Lower PL clock on the board:** `./setup/PLclock` (run on the board via SSH)
 - **Load bitstream — OS 1.04 (Board A):** `cat setup/TDCsystem_wrapper.bit > /dev/xdevcfg` (after `PLclock`). **OS 2.x (synced boards):** `bootgen` → `.bit.bin`, load with `fpgautil -b`, and set the 100 MHz PL clock via a device-tree overlay (PLclock fails on 2.x). See `docs/hardware/deploy.md`.
 - **Compile C server on the board:** `gcc -o tdc_server setup/TDCserver2.c -lm` (gcc is present on the board's ARM Linux)
@@ -105,10 +107,10 @@ Mistakes in HDL/firmware are slow and expensive to debug on real hardware, and t
 
 - **D1 (clock sync) — DECIDED: Path B.** Re-clock the TDC from a shared 125 MHz (Click Shield) because the TDC core runs off the PS crystal, not the ADC clock (verified from the block design). Board A stays standalone; synced system = external-clock boards on OS 2.x. Implementation pending (S2). → ADR-0001 (Accepted).
 - **D2 (coincidence location) — DECIDED: host.** k-way merge of per-channel streams → single sliding-window pass; skip the O(N²) prototype. → ADR-0002.
-- **D7 (toolchain) — DECIDED.** Vivado 2018.2; prebuilt 2-ch bitstream as black box through S3; Board A on OS 1.04. → decision log.
+- **D7 (toolchain) — DECIDED.** Vivado 2025.2 (upgraded from 2018.2); prebuilt 2-ch bitstream as black box through S3; Board A on OS 1.04. → decision log.
 - **D3 (GUI stack) — OPEN.** Free + portable for non-engineers.
 - **D4 (wire format) — OPEN; lean packed.** Only 43/64 bits are payload → packed format ~doubles the rate ceiling.
-- **D5 (PNR) — OPEN (feasibility).** Timing-based; laser-sync (2N−1, system-wide under Path B) vs self-reference comparators (2 ch/detector). `trigger_in` ruled out as a sync input. Validate the jitter budget on the function generator first.
+- **D5 (PNR) — OPEN (feasibility).** Timing-based; laser-sync (2N−1, system-wide under Path B) vs self-reference comparators (2 ch/detector). `trigger_in` ruled out as a sync input. Per-tap code-density calibration is a prerequisite (DNL at the photon-number scale). Validate the jitter budget on the function generator first.
 - **D6 (window/rate) — partially answered.** Few-ns window OK; ~10–12 M tags/s/board Ethernet ceiling; refine once singles rate known.
 
 ## Pointers

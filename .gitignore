@@ -1,4 +1,5 @@
 # --- Vivado / Xilinx ---
+vivado_project/
 *.jou
 *.log
 *.str
